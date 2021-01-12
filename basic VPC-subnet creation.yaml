@@ -1,0 +1,92 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: Travis Cloudformation Lab VPC
+
+
+
+Resources:
+#Create my vpc
+  CustomVPC:
+      Type: AWS::EC2::VPC
+      Properties: 
+          CidrBlock: "10.0.0.0/16"
+          EnableDnsHostnames: true
+          EnableDnsSupport: true
+          Tags:
+            - Key: Name
+              Value: !Sub '$AWS::Stackname}-lab-vpc'
+
+
+#Create each of the subnet
+  TSPublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: '10.0.0.0/24'
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [ 0, !GetAZs ]
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-subnet-a'
+      VpcId: !Ref CustomVPC
+  TSPublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: '10.0.1.0/24'
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [ 1, !GetAZs ]
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-subnet-b'
+      VpcId: !Ref CustomVPC
+  TSPrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: '10.0.3.0/24'
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Select [ 0, !GetAZs ]
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-private-subnet-a'
+      VpcId: !Ref CustomVPC
+  TSPrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: '10.0.4.0/24'
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Select [ 1, !GetAZs ]
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-private-subnet-b'
+      VpcId: !Ref CustomVPC
+
+  # Create Internet gateway
+  TSInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties: 
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-internet-gateway'
+
+  # Attach IGW
+  TSAttachIGWtoVPC:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: 
+      InternetGatewayId: !Ref TSInternetGateway
+      VpcId: !Ref CustomVPC
+
+
+Outputs:
+  AccountID:
+    Description: Application VPC Account ID.
+    Value: !Sub '${AWS::AccountId}'
+  ApplicationVPCID:
+    Description: Application VPC ID.
+    Value: !Sub '${CustomVPC}'
+  SubnetInfo
+    Description: Public Subnets
+    Value: !Sub '${TSPublicSubnetA}'
+    Value: !Sub '${TSPublicSubnetB}'
+    Value: !Sub '${TSPrivateSubnetA}'
+    Value: !Sub '${TSPrivateSubnetB}'
+

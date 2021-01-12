@@ -1,0 +1,493 @@
+################
+#Author: Travis Schlafke
+#version: cloudformation-template-mk4 / 9/28/2020
+#This cloud formation template creates the following resources in AWS:
+#Custom VPC with 4 total subnets, 2 public 2 private in the first 2 AZs of the region with assoicated route tables and entries
+#Internet Gateway(IGW) for public subnet internet access
+#NAT Gateway in the public subnet A&B with a route table in the private subnet A&B pointing to it for HA/Internet reachability
+#Test public and private EC2 instance for routing validation(ICMP/SSH/HTTP access from 0.0.0.0/0 open in SG Inbound)
+#Prompts for keypair attachment for SSH access to EC2 instances
+#creates a record in Route 53 for my test webserver in my Route 53 Hosted Zone
+#
+#
+#
+#
+#
+#
+#
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+
+Description: Travis Cloudformation Lab VPC
+
+Parameters:
+  Keyname:
+    Description: "Name of an existing EC2 KeyPair to enable SSH access to the instance"
+    Type: AWS::EC2::KeyPair::KeyName
+
+Mappings:
+  RegionMap:
+    us-east-1:
+      AMI: ami-09d069a04349dc3cb
+    us-east-2:
+      AMI: ami-0d542ef84ec55d71c
+    us-west-1:
+      AMI: ami-04bc3da8f14823e88
+    us-west-2:
+      AMI: ami-01460aa81365561fe
+
+Resources:
+########################################
+#     Create My Base VPC services      #
+########################################
+  CustomVPC:
+      Type: AWS::EC2::VPC
+      Properties: 
+          CidrBlock: "10.0.0.0/16"
+          EnableDnsHostnames: true
+          EnableDnsSupport: true
+          Tags:
+            - Key: Name
+              Value: !Sub '{AWS::Stackname}-lab-vpc'
+
+
+#Create each of the subnets for public and private
+  TSPublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: '10.0.0.0/24'
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [ 0, !GetAZs ]
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-subnet-a'
+      VpcId: !Ref CustomVPC
+  TSPublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: '10.0.1.0/24'
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [ 1, !GetAZs ]
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-subnet-b'
+      VpcId: !Ref CustomVPC
+  TSPrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: '10.0.3.0/24'
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Select [ 0, !GetAZs ]
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-private-subnet-a'
+      VpcId: !Ref CustomVPC
+  TSPrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: '10.0.4.0/24'
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Select [ 1, !GetAZs ]
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-private-subnet-b'
+      VpcId: !Ref CustomVPC
+
+# Create Internet gateway
+  TSInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties: 
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-internet-gateway'
+
+# Attach IGW to the VPC
+  TSAttachIGWtoVPC:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: 
+      InternetGatewayId: !Ref TSInternetGateway
+      VpcId: !Ref CustomVPC
+
+#create a VGW and attach it to the vpc
+# VPNGateway:
+# Type: AWS::EC2::VPNGateway
+# Properties: 
+#   AmazonSideAsn: Long
+#   Tags: 
+#     - Tag
+#   Type: String
+
+# VGWAttachment:
+# Type: AWS::EC2::VPCGatewayAttachment
+# Properties: 
+#   InternetGatewayId: String
+#   VpcId: String
+#   VpnGatewayId: String
+
+########################################
+#       Public Subnet resources        #
+########################################
+
+
+#create my various route tables for public subnets
+  PublicRouteTableA:
+    Type: AWS::EC2::RouteTable
+    Properties: 
+      VpcId: !Ref CustomVPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-rt-a'
+  PublicRouteTableB:
+    Type: AWS::EC2::RouteTable
+    Properties: 
+      VpcId: !Ref CustomVPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-rt-b'
+
+#add default route to internet for public subnets
+  AddIGWRoutingRuleA:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTableA
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref TSInternetGateway
+  AddIGWInternetRuleB:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTableB
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref TSInternetGateway
+
+#associate route table to subnet
+  AssociatePublicSubnetAWithRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      RouteTableId: !Ref PublicRouteTableA
+      SubnetId: !Ref TSPublicSubnetA
+  AssociatePublicSubnetBWithRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: 
+      RouteTableId: !Ref PublicRouteTableB
+      SubnetId: !Ref TSPublicSubnetB
+
+
+########################################
+##create NAT Gateway related resources##
+########################################
+#nat gateway a for HA  
+  ElasticIPforNATA:
+    Type: AWS::EC2::EIP 
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-EIP-NAT-Gateway-A'
+
+  NATGatewayA:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt ElasticIPforNATA.AllocationId
+      SubnetId: !Ref TSPublicSubnetA
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-NAT-Gateway-A'
+  PrivateRouteTableA:
+      Type: AWS::EC2::RouteTable
+      Properties: 
+        VpcId: !Ref CustomVPC
+        Tags:
+          - Key: Name
+            Value: !Sub '${AWS::StackName}-private-rt-a'
+  AddNATRoutingRulePrivateSubnetA:
+      Type: AWS::EC2::Route
+      Properties:
+        RouteTableId: !Ref PrivateRouteTableA
+        DestinationCidrBlock: 0.0.0.0/0
+        NatGatewayId: !Ref NATGatewayA
+
+  AssociatePrivateSubnetWithRouteTable:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties: 
+        RouteTableId: !Ref PrivateRouteTableA
+        SubnetId: !Ref TSPrivateSubnetA
+
+
+#nat gateway B for HA
+  ElasticIPforNATB:
+    Type: AWS::EC2::EIP 
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-EIP-NAT-Gateway-B'
+
+  NATGatewayB:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt ElasticIPforNATB.AllocationId
+      SubnetId: !Ref TSPublicSubnetB
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-NAT-Gateway-B'
+  
+
+  PrivateRouteTableB:
+      Type: AWS::EC2::RouteTable
+      Properties: 
+        VpcId: !Ref CustomVPC
+        Tags:
+          - Key: Name
+            Value: !Sub '${AWS::StackName}-private-rt-b'
+
+  AddNATRoutingRulePrivateSubnetB:
+      Type: AWS::EC2::Route
+      Properties:
+        RouteTableId: !Ref PrivateRouteTableB
+        DestinationCidrBlock: 0.0.0.0/0
+        NatGatewayId: !Ref NATGatewayB
+
+  AssociatePrivateSubnetWithRouteTable:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties: 
+        RouteTableId: !Ref PrivateRouteTableB
+        SubnetId: !Ref TSPrivateSubnetB
+
+# #create network ACL 
+#   PrivateSubnetNACL-Inbound:
+#       Type: AWS::EC2::NetworkAcl
+#       Properties:
+#          VpcId: vpc-1122334455aabbccd
+#          Tags:
+#          - Key: Name
+#            Value: NACLforSSHTraffic
+#     InboundRule:
+#       Type: AWS::EC2::NetworkAclEntry
+#       Properties:
+#          NetworkAclId:
+#            Ref: MyNACL
+#          RuleNumber: 100
+#          Protocol: 6
+#          RuleAction: allow
+#          CidrBlock: 172.16.0.0/24
+#          PortRange:
+#            From: 22
+#            To: 22
+#     OutboundRule:
+#       Type: AWS::EC2::NetworkAclEntry
+#       Properties:
+#          NetworkAclId:
+#            Ref: MyNACL
+#          RuleNumber: 100
+#          Protocol: -1
+#          Egress: true
+#          RuleAction: allow
+#          CidrBlock: 0.0.0.0/0
+
+
+#create my security group for test public webserver
+  tsSecurityGroupWebservers:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub 'Security Group created with CF template for with ${AWS::StackName}'
+      VpcId : !Ref CustomVPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: icmp
+        FromPort: -1
+        ToPort: -1 
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-webserver-sg'
+        - Key: Description
+          Value: !Sub 'Security Group created for Webservers with ${AWS::StackName}.'
+
+#security group for test websservers in private subnet
+  SecurityGroupPrivateServers:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub 'Security Group created with CF template for with ${AWS::StackName}'
+      VpcId : !Ref CustomVPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: icmp
+        FromPort: -1
+        ToPort: -1 
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-public-webserver-sg'
+        - Key: Description
+          Value: !Sub 'Security Group created for Private Servers with ${AWS::StackName}.'
+
+
+###############################
+## creating compute resources##
+###############################
+
+#create a public ec2 webserver
+  TSEC2PublicInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: TSAttachIGWtoVPC
+    Properties:
+      InstanceType: t2.micro
+      ImageId:
+        Fn::FindInMap:
+        - RegionMap
+        - !Ref AWS::Region
+        - AMI
+      KeyName: !Ref Keyname
+      Tags:
+        - Key: Name
+          Value: !Join [ '-', [!Sub '${AWS::StackName}', 'public-server', 'instance', '1'] ]
+      SecurityGroupIds:
+        - !Ref tsSecurityGroupWebservers
+      SubnetId: !Join [ ',', [!Ref TSPublicSubnetA] ]
+      UserData:
+        Fn::Base64:
+          !Join [ "", [
+            "#!/bin/bash -xe\n",
+            "yum update -y\n",
+            "sudo /opt/aws/bin/cfn-init -v ", #use cfn-init to install packages in cloudformation init
+            !Sub "--stack ${AWS::StackName} ",
+            "--resource TSEC2PublicInstance ",
+            "--configsets InstallAndConfigure ",
+            !Sub "--region ${AWS::Region}",
+            "\n"] ]
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets: 
+          InstallAndConfigure:
+            - "config"
+        config: 
+          packages: 
+            yum: 
+              httpd: []
+          files:
+              "/var/www/html/index.html":
+                content: "<html> <h1> The Hero of Hyrule </h1><body><img src=https://vignette.wikia.nocookie.net/characterprofile/images/a/a1/LinkZelda.png/revision/latest/scale-to-width-down/340?cb=20160105030137</body></html>"
+                mode: "000644"
+                owner: "root"
+                group: "root"
+          services: 
+            sysvinit: 
+              httpd: 
+                enabled: true
+                ensureRunning: true
+   
+
+  myDNSRecord:
+      Type: AWS::Route53::RecordSet
+      Properties:
+        HostedZoneId : Z09808506ZJKQU747LSN
+        Name: link.pnwlabs.net
+        ResourceRecords:
+        - !GetAtt TSEC2PublicInstance.PublicIp
+        Type: A
+        TTL: '900'
+
+#create ec2 instance private subnet
+  TSEC2PrivateInstance:
+      Type: AWS::EC2::Instance
+      DependsOn: NATGatewayA
+      Properties:
+        InstanceType: t2.micro
+        ImageId:
+          Fn::FindInMap:
+          - RegionMap
+          - !Ref AWS::Region
+          - AMI
+        KeyName: !Ref Keyname
+        Tags:
+          - Key: Name
+            Value: !Join [ '-', [!Sub '${AWS::StackName}', 'private-server', 'instance', '1'] ]
+        SecurityGroupIds:
+          - !Ref SecurityGroupPrivateServers
+        SubnetId: !Join [ ',', [!Ref TSPrivateSubnetA] ]
+        UserData:
+          Fn::Base64:
+            !Join [ "", [
+              "#!/bin/bash -xe\n",
+              "yum update -y\n",
+              "sudo /opt/aws/bin/cfn-init -v ", #use cfn-init to install packages in cloudformation init
+              !Sub "--stack ${AWS::StackName} ",
+              "--resource TSEC2PrivateInstance ",
+              "--configsets InstallAndConfigure ",
+              !Sub "--region ${AWS::Region}",
+              "\n"] ]
+      Metadata:
+        AWS::CloudFormation::Init:
+          configSets: 
+            InstallAndConfigure:
+              - "config"
+          config: 
+            packages: 
+              yum: 
+                httpd: []
+            files:
+                "/var/www/html/index.html":
+                  content: "<html> <h1> The Hero of Hyrule </h1><body><img src=https://vignette.wikia.nocookie.net/characterprofile/images/a/a1/LinkZelda.png/revision/latest/scale-to-width-down/340?cb=20160105030137</body></html>"
+                  mode: "000644"
+                  owner: "root"
+                  group: "root"
+            services: 
+              sysvinit: 
+                httpd: 
+                  enabled: true
+                  ensureRunning: true
+
+Outputs:
+  AccountID:
+    Description: Application VPC Account ID.
+    Value: !Sub '${AWS::AccountId}'
+  ApplicationVPCID:
+    Description: Application VPC ID.
+    Value: !Sub '${CustomVPC}'
+  SubnetInfo1:
+    Description: Public Subnet
+    Value: !Sub '${TSPublicSubnetA}'
+  SubnetInfo2:
+    Description: Public Subnet
+    Value: !Sub '${TSPublicSubnetB}'
+  SubnetInfo3:
+    Description: Private Subnet
+    Value: !Sub '${TSPrivateSubnetA}'
+  SubnetInfo4:
+    Description: Private Subnet
+    Value: !Sub '${TSPrivateSubnetB}'
+  EC2PublicWebeserverInfo:
+    Description: Ec2 Test Instance
+    Value: !Sub '${TSEC2PublicInstance}'
+  EC2PrivateWebeserverInfo:
+    Description: Ec2 Test Instance
+    Value: !Sub '${TSEC2PrivateInstance}'
+  PublicDNS:
+    Description: Public DNSName of the newly created EC2 instance
+    Value:
+      Fn::GetAtt:
+      - TSEC2PublicInstance
+      - PublicDnsName
+  PublicIP:
+    Description: Public IP address of the newly created EC2 instance
+    Value:
+      Fn::GetAtt:
+      - TSEC2PublicInstance
+      - PublicIp
+
+
